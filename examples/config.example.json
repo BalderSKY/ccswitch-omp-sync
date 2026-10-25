@@ -1,0 +1,12 @@
+{
+	"hosts": ["sub.example.com", "api.example.com"],
+	"fixedIds": {
+		"5f06": "primary"
+	},
+	"claudeCurrentOnly": true,
+	"proxyBase": "http://127.0.0.1:15721",
+	"crossHome": false,
+	"nonChatPattern": "embedding|diffusion|(^|[-/])image|(^|[-/])dall-e",
+	"defaultContextWindow": 1000000,
+	"defaultMaxTokens": 128000
+}

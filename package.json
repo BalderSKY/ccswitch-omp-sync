@@ -1,0 +1,32 @@
+{
+	"name": "ccswitch-omp-sync",
+	"version": "0.1.0",
+	"description": "Sync CC Switch providers into oh-my-pi / omp models.yml. No GUI, no daemon required.",
+	"type": "module",
+	"bin": {
+		"ccswitch-omp-sync": "src/cli.mjs"
+	},
+	"files": [
+		"src",
+		"examples",
+		"README.md",
+		"LICENSE"
+	],
+	"engines": {
+		"node": ">=22.5.0"
+	},
+	"scripts": {
+		"test": "node --test test/*.test.mjs",
+		"sync": "node src/cli.mjs",
+		"dry": "node src/cli.mjs --dry-run"
+	},
+	"keywords": [
+		"cc-switch",
+		"oh-my-pi",
+		"omp",
+		"models.yml",
+		"provider",
+		"sync"
+	],
+	"license": "MIT"
+}
