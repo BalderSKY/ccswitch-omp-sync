@@ -70,6 +70,7 @@ export function hostAllowed(card, cfg) {
  */
 export async function planGroups(cards, cfg, prevModels, deps = {}) {
 	const probe = deps.probeModels ?? probeModels;
+	const cache = deps.cache ?? null;
 	const groups = [];
 	const skipped = [];
 
@@ -86,17 +87,46 @@ export async function planGroups(cards, cfg, prevModels, deps = {}) {
 		selected.push({ card, f: fieldsOf(card, cfg), id: idOf(card, cfg) });
 	}
 
-	// 并发探测，避免一张卡慢拖住全部
-	const probed = await Promise.all(
-		selected.map(s => probe(s.f.probeBase, s.f.probeKey, cfg.probeTimeoutMs)),
+	/**
+	 * 缓存键 = 影响模型列表的全部输入。
+	 *
+	 * 卡没变就没必要联网：一轮探测 7 张卡要 3.6 秒，而写文件只要 30ms。加卡时
+	 * 探一次，之后每轮直接命中缓存 —— 这才是「加卡瞬间生效」能成立的前提，
+	 * 否则每轮都要等 3.6 秒才写出文件。
+	 *
+	 * 键里必须含 key 和 baseUrl：换 key 或换站点后模型列表可能完全不同。
+	 */
+	const cacheKey = (f, id) => `${id}\u0000${f.probeBase}\u0000${f.probeKey}`;
+
+	// 命中缓存的直接用，剩下的才并发探测
+	const hits = new Array(selected.length).fill(null);
+	const misses = [];
+	for (let i = 0; i < selected.length; i++) {
+		const s = selected[i];
+		const cached = cache?.get(cacheKey(s.f, s.id));
+		if (cached?.length) hits[i] = { models: cached, note: "", ok: true, fromCache: true };
+		else misses.push(i);
+	}
+
+	const liveKeys = selected.map(s => cacheKey(s.f, s.id));
+
+	const fresh = await Promise.all(
+		misses.map(i => probe(selected[i].f.probeBase, selected[i].f.probeKey, cfg.probeTimeoutMs)),
 	);
+	misses.forEach((i, k) => {
+		hits[i] = fresh[k];
+	});
 
 	for (let i = 0; i < selected.length; i++) {
 		const { card, f, id } = selected[i];
-		const p = probed[i];
+		const p = hits[i];
+
+		// 原始探测值：先留底，缓存只存这个（过滤前、并集前的真值）
+		const rawProbed = p.models;
 
 		let ids = p.models;
 		let note = p.note;
+		const viaCache = !!p.fromCache;
 
 		// 探不到时用卡里 pin 的模型兜底，下轮补齐
 		if (!ids.length && f.pinned) {
@@ -126,15 +156,26 @@ export async function planGroups(cards, cfg, prevModels, deps = {}) {
 		 */
 		const prev = prevModels?.get(id);
 		if (prev?.length && ids.length < prev.length) {
-			const fresh = ids.length;
+			const freshCount = ids.length;
 			ids = [...new Set([...prev, ...ids])];
-			note = `${note ? `${note}；` : ""}只探到 ${fresh} 个（上次 ${prev.length} 个），沿用并集`;
+			note = `${note ? `${note}；` : ""}只探到 ${freshCount} 个（上次 ${prev.length} 个），沿用并集`;
 		}
 
-		groups.push({ id, f, ids, note, card });
+		/**
+		 * 缓存必须存**原始探测值**，不能存 `ids`。
+		 *
+		 * `ids` 此时已经过过滤与并集：存并集会把一次上游抖动永久固化成「正确
+		 * 结果」，以后再也降不下来。同理 pin 兜底值也不能存 —— 那代表"这次没探
+		 * 到"，不是"上游只有这一个模型"。
+		 */
+		if (!viaCache && p.ok && rawProbed.length) {
+			cache?.set(cacheKey(f, id), rawProbed);
+		}
+
+		groups.push({ id, f, ids, note, card, viaCache });
 	}
 
-	return { groups, skipped };
+	return { groups, skipped, liveKeys };
 }
 
 /** 把分组渲染成 providers 段内的行。 */
