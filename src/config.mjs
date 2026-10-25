@@ -182,6 +182,14 @@ export function loadConfig(opts = {}) {
 		/** 探针超时（毫秒）。 */
 		probeTimeoutMs: pick("CCSYNC_PROBE_TIMEOUT", "probeTimeoutMs", 15_000),
 
+		/**
+		 * 模型列表缓存文件。
+		 *
+		 * 一轮联网探测 7 张卡要 3.6 秒，写文件只要 30ms。缓存让「卡没变」的轮次
+		 * 直接跳过网络，这才是加卡后能在 1 秒内生效的前提。
+		 */
+		cacheFile: pick("CCSYNC_CACHE", "cacheFile", join(HOME, ".cache", "ccswitch-omp-sync", "models.json")),
+
 		/** 过滤非对话模型的正则源串（可覆盖）。 */
 		nonChatPattern:
 			pick("CCSYNC_NON_CHAT", "nonChatPattern", null) ??
