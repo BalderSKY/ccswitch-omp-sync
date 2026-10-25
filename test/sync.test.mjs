@@ -273,3 +273,143 @@ test("findProvidersSection: 容忍行尾注释，且不吃段外内容", () => {
 	const s = findProvidersSection(lines);
 	assert.deepEqual(s, { start: 1, end: 5 });
 });
+
+// ── 模型列表缓存 ──────────────────────────────────────────
+
+test("openCache: 命中后不再调用探针", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const cache = openCache(""); // 纯内存
+	let called = 0;
+	const counting = async () => {
+		called++;
+		return { models: ["m1", "m2"], note: "", ok: true };
+	};
+	const cards = [card()];
+
+	const first = await planGroups(cards, CFG, new Map(), { probeModels: counting, cache });
+	assert.equal(called, 1);
+	assert.deepEqual(first.groups[0].ids, ["m1", "m2"]);
+	assert.equal(first.groups[0].viaCache, false);
+
+	const second = await planGroups(cards, CFG, new Map(), { probeModels: counting, cache });
+	assert.equal(called, 1, "第二轮应命中缓存，不该再探");
+	assert.deepEqual(second.groups[0].ids, ["m1", "m2"]);
+	assert.equal(second.groups[0].viaCache, true);
+});
+
+test("openCache: 换 key 使缓存失效（模型列表可能不同）", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const cache = openCache("");
+	let called = 0;
+	const counting = async () => {
+		called++;
+		return { models: ["m"], note: "", ok: true };
+	};
+	await planGroups([card()], CFG, new Map(), { probeModels: counting, cache });
+	await planGroups([card({ apiKey: "sk-9999" })], CFG, new Map(), { probeModels: counting, cache });
+	assert.equal(called, 2, "换 key 后应重新探测");
+});
+
+test("openCache: 换 baseUrl 使缓存失效", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const cache = openCache("");
+	let called = 0;
+	const counting = async () => {
+		called++;
+		return { models: ["m"], note: "", ok: true };
+	};
+	await planGroups([card()], CFG, new Map(), { probeModels: counting, cache });
+	await planGroups([card({ baseUrl: "https://other.example.com" })], CFG, new Map(), {
+		probeModels: counting,
+		cache,
+	});
+	assert.equal(called, 2, "换站点后应重新探测");
+});
+
+test("openCache: 探测失败的结果不进缓存（避免固化失败）", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const cache = openCache("");
+	let called = 0;
+	const failing = async () => {
+		called++;
+		return { models: [], note: "HTTP 500", ok: false };
+	};
+	await planGroups([card()], CFG, new Map(), { probeModels: failing, cache });
+	await planGroups([card()], CFG, new Map(), { probeModels: failing, cache });
+	assert.equal(called, 2, "失败不该被缓存，下轮要重试");
+});
+
+test("openCache: 抖动兜底后的并集不进缓存", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const cache = openCache("");
+	const prev = new Map([["ccs-abcd", ["m1", "m2", "m3"]]]);
+	// 探到 1 个 → 并集变 3 个，但缓存里应只存探到的 1 个
+	await planGroups([card()], CFG, prev, {
+		probeModels: async () => ({ models: ["m1"], note: "", ok: true }),
+		cache,
+	});
+	const key = "ccs-abcd\u0000https://api.example.com\u0000sk-abcd1234";
+	assert.deepEqual(cache.get(key), ["m1"], "缓存存原始探测值，不存并集");
+});
+
+test("openCache: TTL 过期后重探", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	let t = 1000;
+	const cache = openCache("", { now: () => t, ttlMs: 100 });
+	let called = 0;
+	const counting = async () => {
+		called++;
+		return { models: ["m"], note: "", ok: true };
+	};
+	await planGroups([card()], CFG, new Map(), { probeModels: counting, cache });
+	t = 1050;
+	await planGroups([card()], CFG, new Map(), { probeModels: counting, cache });
+	assert.equal(called, 1, "TTL 内命中");
+	t = 1200;
+	await planGroups([card()], CFG, new Map(), { probeModels: counting, cache });
+	assert.equal(called, 2, "过期后重探");
+});
+
+test("openCache: prune 清掉不再使用的键", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const cache = openCache("");
+	cache.set("dead\u0000x\u0000y", ["m"]);
+	assert.equal(cache.size(), 1);
+	cache.prune(["other\u0000x\u0000y"]);
+	assert.equal(cache.size(), 0);
+});
+
+test("openCache: 落盘后重新打开仍命中", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const { mkdtempSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = mkdtempSync(join(tmpdir(), "ccsc-"));
+	const file = join(dir, "models.json");
+	try {
+		const a = openCache(file);
+		a.set("k\u0000u\u0000s", ["x", "y"]);
+		a.flush();
+
+		const b = openCache(file);
+		assert.deepEqual(b.get("k\u0000u\u0000s"), ["x", "y"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("openCache: 缓存文件损坏时当作空缓存，不抛错", async () => {
+	const { openCache } = await import("../src/cache.mjs");
+	const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = mkdtempSync(join(tmpdir(), "ccsc-"));
+	const file = join(dir, "models.json");
+	try {
+		writeFileSync(file, "{ 这不是 JSON");
+		const c = openCache(file);
+		assert.equal(c.size(), 0);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
