@@ -8,6 +8,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { openCache } from "./cache.mjs";
 import { readCards } from "./ccswitch.mjs";
 import { describeConfig, loadConfig } from "./config.mjs";
 import { applyToText, planGroups, readPrevModels } from "./sync.mjs";
@@ -16,6 +17,7 @@ const argv = process.argv.slice(2);
 const DRY = argv.includes("--dry-run");
 const JSON_OUT = argv.includes("--json");
 const SHOW_CONFIG = argv.includes("--print-config");
+const REFRESH = argv.includes("--refresh");
 const HELP = argv.includes("--help") || argv.includes("-h");
 
 const USAGE = `
@@ -89,7 +91,16 @@ function main() {
 	// 读现有模型列表用于抖动兜底
 	const prevModels = readPrevModels(readFileSync(cfg.targets[0], "utf8"));
 
-	const run = planGroups(read.cards, cfg, prevModels).then(({ groups, skipped }) => {
+	/**
+	 * 模型列表缓存。
+	 *
+	 * `--refresh` 时用纯内存缓存（等于不命中），强制重新探测全部卡。加卡或换 key
+	 * 后缓存键本来就变了，会自动重探；`--refresh` 用于「上游上新了模型，想立刻
+	 * 看到」的场景。
+	 */
+	const cache = openCache(REFRESH ? "" : cfg.cacheFile);
+
+	const run = planGroups(read.cards, cfg, prevModels, { cache }).then(({ groups, skipped, liveKeys }) => {
 		const problems = read.problems;
 		if (!groups.length) {
 			console.error("✗ 一个分组都产不出来，什么都不写。");
@@ -98,6 +109,9 @@ function main() {
 			}
 			return 1;
 		}
+
+		cache.prune(liveKeys ?? []);
+		cache.flush();
 
 		const results = [];
 		for (const file of cfg.targets) {
